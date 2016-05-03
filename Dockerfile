@@ -24,4 +24,3 @@ RUN make -C /tmp/install/digitiser_decode
 # Install
 USER root
 RUN cp /tmp/install/digitiser_decode/digitiser_decode /tmp/install/digitiser_decode/digitiser_capture.py /usr/local/bin
-USER kat
