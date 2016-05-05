@@ -8,9 +8,6 @@ all: digitiser_decode
 digitiser_decode: digitiser_decode.o $(SPEAD2_DIR)/src/libspead2.a
 	$(CXX) -o $@ $< $(LDFLAGS)
 
-%: %.o $(SPEAD2_DIR)/src/libspead2.a
-	$(CXX) -o $@ $< $(LDFLAGS)
-
 %.o: %.cpp Makefile
 	$(CXX) -c $< $(CXXFLAGS)
 
