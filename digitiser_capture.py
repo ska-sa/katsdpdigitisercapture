@@ -59,8 +59,9 @@ def main():
         tcpdump = []
         for i in range(2):
             tcpdump.append(subprocess.Popen(
-                ['tcpdump', '-i', args.interface[i], '-p', '-q', '-s', '8192', '-B', '1048576',
-                 'ip proto \\udp and dst port {}'.format(args.port[i]),
+                ['hwloc-bind', 'os={}'.format(args.interface[i]), '--',
+                 'tcpdump', '-i', args.interface[i], '-n', '-p', '-q', '-s', '8192', '-B', '4096',
+                 'ip proto \\udp and dst port {} and dst host {}'.format(args.port[i], args.address[i]),
                  '-w', pcap_file[i].name
                 ]))
         time.sleep(args.seconds)

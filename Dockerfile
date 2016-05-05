@@ -5,7 +5,7 @@ MAINTAINER Bruce Merry "bmerry@ska.ac.za"
 # Install system packages
 USER root
 RUN apt-get -y update && apt-get --no-install-recommends -y install \
-    tcpdump libpcap-dev libtbb-dev libboost-program-options1.55-dev
+    tcpdump libpcap-dev libtbb-dev libboost-program-options1.55-dev hwloc-nox
 USER kat
 
 # Install dependencies for the script
