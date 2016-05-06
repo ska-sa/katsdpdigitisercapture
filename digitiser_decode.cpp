@@ -254,6 +254,7 @@ private:
 
 public:
     std::uint64_t n_heaps = 0;
+    std::uint64_t first_timestamp = 0;
 
     explicit interleaver(const options &opts)
         : thread_pool(2), max_heaps(opts.max_heaps)
@@ -280,6 +281,7 @@ public:
                     *info[i] = streams[i]->pop();
             }
             next_timestamp = std::min(info[0]->timestamp, info[1]->timestamp);
+            first_timestamp = next_timestamp;
         }
         catch (spead2::ringbuffer_stopped)
         {
@@ -467,4 +469,14 @@ int main(int argc, char **argv)
     out << '\n';
     out.close();
     std::cout << "Header successfully written\n";
+
+    // Write the timestamp file
+    std::ofstream timestamp_file(opts.output_file + ".timestamp");
+    timestamp_file.exceptions(std::ios::failbit | std::ios::badbit);
+    timestamp_file << inter.first_timestamp << '\n';
+    timestamp_file.close();
+    std::cout << "Write timestamp file\n\n";
+    std::cout << "Completed capture+conversion of " << inter.n_heaps
+        << " heaps from timestamp " << inter.first_timestamp << '\n';
+    return 0;
 }
