@@ -1,5 +1,5 @@
 CXX = g++
-SPEAD2_DIR = ../spead2
+SPEAD2_DIR = ../../spead2
 CXXFLAGS = -std=c++11 -Wall -g -pthread -I$(SPEAD2_DIR)/src -O3
 LDFLAGS = -L$(SPEAD2_DIR)/src -lspead2 -lpcap -lboost_program_options -lboost_system -pthread -ltbb
 

@@ -19,7 +19,7 @@ RUN mkdir -p /tmp/install/digitiser_decode && \
 
 # Compile digitiser_decode
 COPY . /tmp/install/digitiser_decode
-RUN make -C /tmp/install/digitiser_decode
+RUN make -C /tmp/install/digitiser_decode SPEAD2_DIR=../spead2
 
 # Install
 USER root
