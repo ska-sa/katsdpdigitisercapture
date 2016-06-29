@@ -36,6 +36,7 @@ def parse_args():
                         help='Temporary directories (should be ramdisks)')
     parser.add_argument('-s', '--seconds', type=float, default=5, help='Length of capture')
     parser.add_argument('--heaps', type=int, help='Maximum number of heaps to convert')
+    parser.add_argument('--keep', action='store_true', help='Do not delete the pcap files')
     parser.add_argument('--non-icd', action='store_true',
                         help='Assume digitiser is not ICD compliant')
     return parser.parse_args()
@@ -53,7 +54,8 @@ def main():
     args = parse_args()
     pcap_file = []
     for i in range(2):
-        pcap_file.append(tempfile.NamedTemporaryFile(suffix='.pcap', dir=args.tmpdir[i]))
+        pcap_file.append(tempfile.NamedTemporaryFile(
+            suffix='.pcap', dir=args.tmpdir[i], delete=not args.keep))
     # Socket for multicast subscriptions
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     with contextlib.closing(sock), pcap_file[0], pcap_file[1]:
