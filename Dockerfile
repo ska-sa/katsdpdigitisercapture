@@ -14,7 +14,7 @@ RUN pip install netifaces==0.10.4
 # Check out and build spead2
 RUN mkdir -p /tmp/install/digitiser_decode && \
     cd /tmp/install && \
-    git clone --single-branch --branch v0.8.0 --depth 1 https://github.com/ska-sa/spead2 && \
+    git clone --single-branch --branch v0.10.4 --depth 1 https://github.com/ska-sa/spead2 && \
     make -j8 -C spead2/src libspead2.a
 
 # Compile digitiser_decode
