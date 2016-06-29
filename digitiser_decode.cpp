@@ -273,6 +273,7 @@ public:
                 info[i].reset(new heap_info(streams[i]->pop()));
                 while (info[i]->timestamp == 0)
                     *info[i] = streams[i]->pop();
+                std::cout << "First timestamp in stream " << i << " is " << info[i]->timestamp << '\n';
             }
             // Align by timestamps
             for (int i = 0; i < 2; i++)
@@ -282,6 +283,7 @@ public:
             }
             next_timestamp = std::min(info[0]->timestamp, info[1]->timestamp);
             first_timestamp = next_timestamp;
+            std::cout << "First synchronised timestamp is " << first_timestamp << '\n';
         }
         catch (spead2::ringbuffer_stopped)
         {
