@@ -192,7 +192,7 @@ struct options
 {
     bool non_icd = false;
     std::uint64_t max_heaps = std::numeric_limits<std::uint64_t>::max();
-    std::string input_files[2];
+    std::string input_file;
     std::string output_file;
 };
 
@@ -202,7 +202,8 @@ public:
     spead2::recv::heap heap;
     std::uint64_t timestamp = 0;
     const std::uint8_t *data = nullptr;
-    std::size_t length = 0;
+    std::size_t length = 0;   // length of payload in bytes
+    std::size_t samples = 0;  // length in digitiser samples
 
     explicit heap_info(spead2::recv::heap &&heap);
     heap_info &operator=(spead2::recv::heap &&heap);
@@ -228,6 +229,7 @@ void heap_info::update()
     timestamp = 0;
     data = nullptr;
     length = 0;
+    samples = 0;
     for (const auto &item : heap.get_items())
     {
         if (item.id == 0x1600 && item.is_immediate)
@@ -236,6 +238,7 @@ void heap_info::update()
         {
             data = item.ptr;
             length = item.length;
+            samples = length * 8 / 10;
         }
     }
 }
@@ -243,45 +246,44 @@ void heap_info::update()
 typedef std::vector<heap_info> heap_info_batch;
 typedef std::vector<std::vector<std::int16_t>> decoded_batch;
 
-class interleaver
+class loader
 {
 private:
     spead2::thread_pool thread_pool;
-    std::unique_ptr<spead2::recv::ring_stream<>> streams[2];
-    std::unique_ptr<heap_info> info[2];
+    spead2::recv::ring_stream<> stream;
+    // Buffer for heaps that were read while looking for sync, but still need
+    // to be processed
+    std::deque<heap_info> infoq;
     std::uint64_t next_timestamp;
     std::uint64_t max_heaps;
+    bool finished = false;
 
 public:
     std::uint64_t n_heaps = 0;
     std::uint64_t first_timestamp = 0;
 
-    explicit interleaver(const options &opts)
-        : thread_pool(2), max_heaps(opts.max_heaps)
+    explicit loader(const options &opts)
+        : thread_pool(),
+        stream(thread_pool, 2, 128), max_heaps(opts.max_heaps)
     {
-        for (int i = 0; i < 2; i++)
-        {
-            streams[i].reset(new spead2::recv::ring_stream<>(thread_pool, 2, 128));
-            streams[i]->emplace_reader<pcap_file_reader>(opts.input_files[i]);
-        }
+        stream.emplace_reader<pcap_file_reader>(opts.input_file);
 
         try
         {
-            // Skip ahead until first packet with timestamp
-            for (int i = 0; i < 2; i++)
+            /* Two multicast groups are interleaved, and the multicast
+             * subscriptions may have kicked in at different times. Proceed
+             * until we see two consecutive samples.
+             */
+            infoq.emplace_back(stream.pop());
+            infoq.emplace_back(stream.pop());
+            std::cout << "First timestamp is " << infoq[0].timestamp << '\n';
+            while (infoq[0].timestamp == 0 || infoq[1].timestamp == 0
+                   || infoq[1].timestamp != infoq[0].timestamp + infoq[0].samples)
             {
-                info[i].reset(new heap_info(streams[i]->pop()));
-                while (info[i]->timestamp == 0)
-                    *info[i] = streams[i]->pop();
-                std::cout << "First timestamp in stream " << i << " is " << info[i]->timestamp << '\n';
+                infoq.pop_front();
+                infoq.emplace_back(stream.pop());
             }
-            // Align by timestamps
-            for (int i = 0; i < 2; i++)
-            {
-                while (info[i]->timestamp + info[i]->length < info[!i]->timestamp)
-                    *info[i] = streams[i]->pop();
-            }
-            next_timestamp = std::min(info[0]->timestamp, info[1]->timestamp);
+            next_timestamp = infoq[0].timestamp;
             first_timestamp = next_timestamp;
             std::cout << "First synchronised timestamp is " << first_timestamp << '\n';
         }
@@ -296,44 +298,42 @@ public:
     {
         constexpr int batch_size = 32;
         heap_info_batch batch;
-        if (streams[0])
+        if (!finished)
         {
             for (int i = 0; i < batch_size; i++)
             {
                 if (n_heaps >= max_heaps)
                 {
                     std::cout << "Stopping after " << max_heaps << " heaps\n";
-                    streams[0].reset();
-                    streams[1].reset();
+                    finished = true;
                     break;
                 }
-                int idx;
-                for (idx = 0; idx < 2; idx++)
-                    if (info[idx] && info[idx]->timestamp == next_timestamp)
-                        break;
-                if (idx == 2)
+                if (infoq.empty())
                 {
-                    if (!info[0] || !info[1])
-                        std::cout << "One or both streams has ended after " << n_heaps << " heaps\n";
-                    else
-                        std::cerr << "Timestamps do not match up, aborting\n"
-                            << "Expected " << next_timestamp << ", have "
-                            << info[0]->timestamp << ", " << info[1]->timestamp << '\n';
-                    streams[0].reset();
-                    streams[1].reset();
+                    try
+                    {
+                        infoq.emplace_back(stream.pop());
+                    }
+                    catch (spead2::ringbuffer_stopped)
+                    {
+                        std::cout << "Stream ended after " << n_heaps << " heaps\n";
+                        finished = true;
+                        break;
+                    }
+                }
+                heap_info info = std::move(infoq[0]);
+                infoq.pop_front();
+                if (info.timestamp != next_timestamp)
+                {
+                    std::cout.flush();
+                    std::cerr << "Timestamps do not match up, aborting\n"
+                        << "Expected " << next_timestamp << ", have " << info.timestamp << '\n';
+                    finished = true;
                     break;
                 }
                 n_heaps++;
-                next_timestamp += info[idx]->length * 8 / 10;
-                batch.push_back(std::move(*info[idx]));
-                try
-                {
-                    *info[idx] = streams[idx]->pop();
-                }
-                catch (spead2::ringbuffer_stopped)
-                {
-                    info[idx].reset();
-                }
+                next_timestamp += info.samples;
+                batch.push_back(std::move(info));
             }
         }
         return batch;
@@ -366,16 +366,14 @@ static options parse_options(int argc, char **argv)
         ("heaps", make_opt(opts.max_heaps), "Number of heaps to process [all]")
     ;
     hidden.add_options()
-        ("input1", make_opt(opts.input_files[0]), "input1")
-        ("input2", make_opt(opts.input_files[1]), "input2")
+        ("input", make_opt(opts.input_file), "input")
         ("output", make_opt(opts.output_file), "output")
     ;
     all.add(desc);
     all.add(hidden);
 
     po::positional_options_description positional;
-    positional.add("input1", 1);
-    positional.add("input2", 1);
+    positional.add("input", 1);
     positional.add("output", 1);
     try
     {
@@ -404,13 +402,13 @@ static options parse_options(int argc, char **argv)
 int main(int argc, char **argv)
 {
     options opts = parse_options(argc, argv);
-    // Leave 2 cores free for decoding the SPEAD stream
-    int n_threads = tbb::task_scheduler_init::default_num_threads() - 2;
+    // Leave 1 core free for decoding the SPEAD stream
+    int n_threads = tbb::task_scheduler_init::default_num_threads() - 1;
     if (n_threads < 1)
         n_threads = 1;
     tbb::task_scheduler_init init_tbb(n_threads);
 
-    interleaver inter(opts);
+    loader load(opts);
 
     const int header_size = 96;
     std::ofstream out(opts.output_file, std::ios::out | std::ios::binary);
@@ -421,7 +419,7 @@ int main(int argc, char **argv)
 
     auto read_filter = [&] (tbb::flow_control &fc) -> std::shared_ptr<heap_info_batch>
     {
-        std::shared_ptr<heap_info_batch> batch = std::make_shared<heap_info_batch>(inter.next_batch());
+        std::shared_ptr<heap_info_batch> batch = std::make_shared<heap_info_batch>(load.next_batch());
         if (batch->empty())
             fc.stop();
         return batch;
@@ -475,10 +473,10 @@ int main(int argc, char **argv)
     // Write the timestamp file
     std::ofstream timestamp_file(opts.output_file + ".timestamp");
     timestamp_file.exceptions(std::ios::failbit | std::ios::badbit);
-    timestamp_file << inter.first_timestamp << '\n';
+    timestamp_file << load.first_timestamp << '\n';
     timestamp_file.close();
-    std::cout << "Write timestamp file\n\n";
-    std::cout << "Completed capture+conversion of " << inter.n_heaps
-        << " heaps from timestamp " << inter.first_timestamp << '\n';
+    std::cout << "Timestamp file written\n\n";
+    std::cout << "Completed capture+conversion of " << load.n_heaps
+        << " heaps from timestamp " << load.first_timestamp << '\n';
     return 0;
 }
