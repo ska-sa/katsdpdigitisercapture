@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 from __future__ import print_function, division, absolute_import
 import argparse
-import socket
 import subprocess
 import netifaces
 import struct
@@ -25,6 +24,10 @@ def option_pair(base_type):
     return callback
 
 
+def interface_address(iface):
+    return netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('address', type=option_pair(str), help='Multicast groups')
@@ -42,41 +45,41 @@ def parse_args():
     return parser.parse_args()
 
 
-def subscribe(sock, address, interface):
-    if_address = netifaces.ifaddresses(interface)[netifaces.AF_INET][0]['addr']
-    if_address_raw = socket.inet_aton(if_address)
-    address_raw = socket.inet_aton(address)
-    mreq = struct.pack('4s4s', address_raw, if_address_raw)
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-
-
 def main():
     args = parse_args()
     pcap_file = []
     for i in range(2):
         pcap_file.append(tempfile.NamedTemporaryFile(
             suffix='.pcap', dir=args.tmpdir[i], delete=not args.keep))
-    # Socket for multicast subscriptions
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    with contextlib.closing(sock), pcap_file[0], pcap_file[1]:
-        for i in range(2):
-            subscribe(sock, args.address[i], args.interface[i])
+    with pcap_file[0], pcap_file[1]:
         # Capture data
-        tcpdump = []
+        mcdump = []
         for i in range(2):
-            tcpdump.append(subprocess.Popen(
+            # Determine which cores are local to the NIC
+            cores = subprocess.check_output(
+                ['hwloc-calc', '--intersect', 'pu', '--physical',
+                 'os={}'.format(args.interface[i])])
+            cores = [int(x) for x in cores.decode('ascii').split(',')]
+            # Allocate cores in a way that spreads load even if the NICs
+            # are on the same CPU socket
+            if i == 1:
+                cores.reverse()
+            while len(cores) < 3:
+                cores += cores
+            mcdump.append(subprocess.Popen(
                 ['hwloc-bind', 'os={}'.format(args.interface[i]), '--',
-                 'tcpdump', '-i', args.interface[i], '-n', '-p', '-q', '-s', '8192', '-B', '4096',
-                 'ip proto \\udp and dst port {} and dst host {}'.format(
-                     args.port[i], args.address[i]),
-                 '-w', pcap_file[i].name]))
+                 'mcdump', '-i', interface_address(args.interface[i]),
+                 '--collect-cpu', str(cores[0]),
+                 '--network-cpu', str(cores[1]),
+                 '--disk-cpu', str(cores[2]),
+                 pcap_file[i].name, '{}:{}'.format(args.address[i], args.port[i])]))
         time.sleep(args.seconds)
         for i in range(2):
-            tcpdump[i].send_signal(signal.SIGINT)
+            mcdump[i].send_signal(signal.SIGINT)
         for i in range(2):
-            ret = tcpdump[i].wait()
+            ret = mcdump[i].wait()
             if ret != 0:
-                print('tcpdump returned exit code {}'.format(ret), file=sys.stderr)
+                print('mcdump returned exit code {}'.format(ret), file=sys.stderr)
                 return 1
 
         decode_cmd = ['digitiser_decode']
