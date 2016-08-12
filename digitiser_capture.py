@@ -36,7 +36,7 @@ def parse_args():
     parser.add_argument('--interface', type=str, default='p5p1',
                         help='Network interfaces')
     parser.add_argument('--tmpdir', type=str, default='/mnt/ramdisk0',
-                        help='Temporary directories (should be ramdisks)')
+                        help='Temporary directory (should be a ramdisk)')
     parser.add_argument('-s', '--seconds', type=float, default=5, help='Length of capture')
     parser.add_argument('--heaps', type=int, help='Maximum number of heaps to convert')
     parser.add_argument('--keep', action='store_true', help='Do not delete the pcap files')
