@@ -36,7 +36,8 @@ def parse_args():
     parser.add_argument('--interface', type=str, default='p5p1',
                         help='Network interfaces')
     parser.add_argument('--tmpdir', type=str, default='/mnt/ramdisk0',
-                        help='Temporary directory (should be a ramdisk)')
+                        help='Temporary directory (should be a ramdisk, or use --direct-io)')
+    parser.add_argument('--direct-io', action='store_true', help='Use Direct I/O for packet capture')
     parser.add_argument('-s', '--seconds', type=float, default=5, help='Length of capture')
     parser.add_argument('--heaps', type=int, help='Maximum number of heaps to convert')
     parser.add_argument('--keep', action='store_true', help='Do not delete the pcap files')
@@ -65,7 +66,8 @@ def main():
              '--disk-cpu', str(cores[2]),
              pcap_file.name,
              '{}:{}'.format(args.address[0], args.port[0]),
-             '{}:{}'.format(args.address[1], args.port[1])])
+             '{}:{}'.format(args.address[1], args.port[1])] +
+            ['--direct-io'] if args.direct_io else [])
         time.sleep(args.seconds)
         mcdump.send_signal(signal.SIGINT)
         ret = mcdump.wait()
