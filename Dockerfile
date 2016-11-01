@@ -1,11 +1,11 @@
-FROM sdp-docker-registry.kat.ac.za:5000/docker-base
+FROM sdp-docker-registry.kat.ac.za:5000/docker-base:xenial
 
 MAINTAINER Bruce Merry "bmerry@ska.ac.za"
 
 # Install system packages
 USER root
 RUN apt-get -y update && apt-get --no-install-recommends -y install \
-    libpcap-dev libtbb-dev libboost-program-options1.55-dev hwloc-nox \
+    libpcap-dev libtbb-dev libboost-program-options-dev hwloc-nox \
     autoconf automake
 USER kat
 
@@ -15,11 +15,11 @@ RUN pip install netifaces==0.10.4
 # Check out and build spead2
 RUN mkdir -p /tmp/install/digitiser_decode && \
     cd /tmp/install && \
-    git clone --single-branch --branch v1.0.1 --depth 1 https://github.com/ska-sa/spead2 && \
+    git clone --single-branch --branch v1.2.1 --depth 1 https://github.com/ska-sa/spead2 && \
     mkdir spead2/build && \
     cd spead2 && ./bootstrap.sh && \
     cd build && \
-    ../configure --with-ibv && \
+    ../configure --with-ibv --enable-lto AR=gcc-ar RANLIB=gcc-ranlib && \
     make -j8
 USER root
 RUN make -C /tmp/install/spead2/build install
