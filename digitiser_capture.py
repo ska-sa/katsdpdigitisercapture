@@ -67,7 +67,7 @@ def main():
              pcap_file.name,
              '{}:{}'.format(args.address[0], args.port[0]),
              '{}:{}'.format(args.address[1], args.port[1])] +
-            ['--direct-io'] if args.direct_io else [])
+            (['--direct-io'] if args.direct_io else []))
         time.sleep(args.seconds)
         mcdump.send_signal(signal.SIGINT)
         ret = mcdump.wait()
