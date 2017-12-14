@@ -1,8 +1,11 @@
-#include <spead2/recv_reader.h>
+#include <spead2/recv_udp_pcap.h>
 #include <spead2/recv_stream.h>
 #include <spead2/recv_ring_stream.h>
 #include <spead2/recv_heap.h>
 #include <spead2/common_logging.h>
+#include <iostream>
+#include <iomanip>
+#include <fstream>
 #include <string>
 #include <cstdint>
 #include <stdexcept>
@@ -10,15 +13,14 @@
 #include <memory>
 #include <vector>
 #include <limits>
-#include <arpa/inet.h>
-#include <netinet/ip.h>
-#include <netinet/udp.h>
-#include <net/ethernet.h>
-#include <pcap/pcap.h>
 #include <tbb/pipeline.h>
 #include <tbb/task_scheduler_init.h>
 #include <boost/lexical_cast.hpp>
 #include <boost/program_options.hpp>
+
+#if !SPEAD2_USE_PCAP
+# error "spead2 was built without pcap support"
+#endif
 
 namespace po = boost::program_options;
 
@@ -27,109 +29,6 @@ namespace po = boost::program_options;
 #elif __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
 # error "Only little endian is currently supported"
 #endif
-
-/***************************************************************************/
-
-/* spead2 reader for pcap files (not suitable for live streams, because it
- * assumes non-blocking operation). This could later be made part of spead2.
- */
-
-class pcap_file_reader : public spead2::recv::reader
-{
-private:
-    pcap_t *handle;
-
-    void handler(const struct pcap_pkthdr *h, const std::uint8_t *bytes);
-    static void handler_wrapper(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes);
-    void run();
-
-public:
-    pcap_file_reader(spead2::recv::stream &owner, const std::string &filename);
-    virtual ~pcap_file_reader();
-
-    virtual void stop() override;
-};
-
-void pcap_file_reader::handler(const struct pcap_pkthdr *h, const std::uint8_t *bytes)
-{
-    /* pcap filter ensures unfragmented IP wiith no options, so headers are
-     * 14 bytes for Ethernet
-     * 20 bytes for IP
-     * 8 bytes for UDP
-     */
-    const int hdr_len = 42;
-    spead2::recv::stream_base &s = get_stream_base();
-    if (s.is_stopped() || h->caplen < h->len || h->caplen <= hdr_len)
-        return;
-    spead2::recv::packet_header packet;
-    std::size_t size = decode_packet(packet, bytes + hdr_len, h->caplen - hdr_len);
-    if (size > 0)
-        s.add_packet(packet);
-}
-
-void pcap_file_reader::handler_wrapper(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes)
-{
-    pcap_file_reader *self = (pcap_file_reader *) user;
-    self->handler(h, bytes);
-}
-
-void pcap_file_reader::run()
-{
-    int status = pcap_loop(handle, -1, pcap_file_reader::handler_wrapper,
-                           reinterpret_cast<u_char *>(this));
-    switch (status)
-    {
-    case 0:
-        // End of file
-        get_stream_base().stop_received();
-        break;
-    case -1:
-        // An error occurred
-        spead2::log_warning("pcap error occurred: %s", pcap_geterr(handle));
-        break;
-    case -2:
-        // pcap_breakloop was called. No need to call stop_received(),
-        // since we were externally stopped.
-        break;
-    }
-    stopped();
-}
-
-pcap_file_reader::pcap_file_reader(spead2::recv::stream &owner, const std::string &filename)
-    : spead2::recv::reader(owner)
-{
-    // Open the file
-    char errbuf[PCAP_ERRBUF_SIZE];
-    handle = pcap_open_offline(filename.c_str(), errbuf);
-    if (!handle)
-        throw std::runtime_error(errbuf);
-    // Set a filter to ensure that we only get UDP4 packets with no IP options or fragmentation
-    bpf_program filter;
-    if (pcap_compile(handle, &filter,
-                     "ip proto \\udp and ip[0] & 0xf = 5 and ip[6:2] & 0x3fff = 0",
-                     1, PCAP_NETMASK_UNKNOWN) != 0)
-        throw std::runtime_error(pcap_geterr(handle));
-    if (pcap_setfilter(handle, &filter) != 0)
-    {
-        // TODO: free the filter
-        throw std::runtime_error(pcap_geterr(handle));
-    }
-    pcap_freecode(&filter);
-
-    // Process the file
-    get_stream().get_strand().post([this] { run(); });
-}
-
-pcap_file_reader::~pcap_file_reader()
-{
-    if (handle)
-        pcap_close(handle);
-}
-
-void pcap_file_reader::stop()
-{
-    pcap_breakloop(handle);
-}
 
 /***************************************************************************/
 
@@ -183,10 +82,6 @@ static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::siz
 }
 
 /***************************************************************************/
-
-#include <iostream>
-#include <iomanip>
-#include <fstream>
 
 struct options
 {
@@ -266,7 +161,7 @@ public:
         : thread_pool(),
         stream(thread_pool, 2, 128), max_heaps(opts.max_heaps)
     {
-        stream.emplace_reader<pcap_file_reader>(opts.input_file);
+        stream.emplace_reader<spead2::recv::udp_pcap_file_reader>(opts.input_file);
 
         try
         {
@@ -353,7 +248,7 @@ static po::typed_value<bool> *make_opt(bool &var)
 
 static void usage(std::ostream &o, const po::options_description &desc)
 {
-    o << "Usage: interleave [opts] <input1.pcap> <input2.pcap> <output.npy>\n";
+    o << "Usage: digitiser_decode [opts] <input.pcap> <output.npy>\n";
     o << desc;
 }
 
