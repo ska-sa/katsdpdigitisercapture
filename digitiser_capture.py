@@ -3,12 +3,10 @@ from __future__ import print_function, division, absolute_import
 import argparse
 import subprocess
 import netifaces
-import struct
 import time
 import signal
 import sys
 import tempfile
-import contextlib
 
 
 def option_pair(base_type):
@@ -37,7 +35,8 @@ def parse_args():
                         help='Network interfaces')
     parser.add_argument('--tmpdir', type=str, default='/mnt/ramdisk0',
                         help='Temporary directory (should be a ramdisk, or use --direct-io)')
-    parser.add_argument('--direct-io', action='store_true', help='Use Direct I/O for packet capture')
+    parser.add_argument('--direct-io', action='store_true',
+                        help='Use Direct I/O for packet capture')
     parser.add_argument('-s', '--seconds', type=float, default=5, help='Length of capture')
     parser.add_argument('--heaps', type=int, help='Maximum number of heaps to convert')
     parser.add_argument('--keep', action='store_true', help='Do not delete the pcap files')
