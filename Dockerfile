@@ -37,10 +37,11 @@ RUN make -C /tmp/install/digitiser_decode
 FROM sdp-docker-registry.kat.ac.za:5000/docker-base-runtime
 MAINTAINER Bruce Merry "bmerry@ska.ac.za"
 
-# Install run-time dependencies
+# Install run-time dependencies (netbase is needed because pcap looks up
+# protocols in /etc/protocols).
 USER root
 RUN apt-get -y update && apt-get --no-install-recommends -y install \
-        libpcap0.8 libtbb2 hwloc-nox && \
+        libpcap0.8 libtbb2 hwloc-nox netbase && \
     rm -rf /var/lib/apt/lists/*
 USER kat
 
