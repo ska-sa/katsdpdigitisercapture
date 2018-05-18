@@ -20,6 +20,8 @@ RUN ../configure --with-ibv --enable-lto AR=gcc-ar RANLIB=gcc-ranlib
 RUN make -j8
 USER root
 RUN make -C /tmp/install/spead2/build install
+# Install in a separate directory for copying to the runtime image
+RUN make -C /tmp/install/spead2/build DESTDIR=/tmp/install/spead2-install install
 USER kat
 
 # Install Python dependencies
@@ -43,6 +45,7 @@ RUN apt-get -y update && apt-get --no-install-recommends -y install \
 USER kat
 
 # Install
+COPY --from=build /tmp/install/spead2-install /
 COPY --from=build /tmp/install/digitiser_decode/digitiser_decode /tmp/install/digitiser_decode/digitiser_capture.py /usr/local/bin/
 COPY --from=build --chown=kat:kat /home/kat/ve /home/kat/ve
 ENV PATH="$PATH_PYTHON2" VIRTUAL_ENV="$VIRTUAL_ENV_PYTHON2"
