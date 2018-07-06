@@ -103,8 +103,16 @@ public:
     explicit heap_info(spead2::recv::heap &&heap);
     heap_info &operator=(spead2::recv::heap &&heap);
 
+    // noncopyable suppresses the default move constructor
+    heap_info(heap_info &&) noexcept = default;
+    heap_info &operator=(heap_info &&) noexcept = default;
+
 private:
     void update();
+
+    // make noncopyable
+    heap_info(const heap_info &) = delete;
+    heap_info &operator=(const heap_info &) = delete;
 };
 
 heap_info::heap_info(spead2::recv::heap &&heap) : heap(std::move(heap))
@@ -138,8 +146,25 @@ void heap_info::update()
     }
 }
 
-typedef std::vector<heap_info> heap_info_batch;
-typedef std::vector<std::vector<std::int16_t>> decoded_batch;
+typedef std::vector<heap_info> heap_batch;
+
+class decoded_info
+{
+public:
+    std::uint64_t timestamp;
+    std::vector<int16_t> data;
+
+    decoded_info() = default;
+    decoded_info(decoded_info &&) noexcept = default;
+    decoded_info &operator=(decoded_info &&) noexcept = default;
+
+private:
+    // make noncopyable, just to ensure nothing inefficient is being done
+    decoded_info(const decoded_info &) = delete;
+    decoded_info &operator=(const decoded_info &) = delete;
+};
+
+typedef std::vector<decoded_info> decoded_batch;
 
 class loader
 {
@@ -149,13 +174,13 @@ private:
     // Buffer for heaps that were read while looking for sync, but still need
     // to be processed
     std::deque<heap_info> infoq;
-    std::uint64_t next_timestamp;
     std::uint64_t max_heaps;
     bool finished = false;
 
 public:
     std::uint64_t n_heaps = 0;
     std::uint64_t first_timestamp = 0;
+    std::size_t samples = 0;     // samples per heap
 
     explicit loader(const options &opts)
         : thread_pool(),
@@ -172,14 +197,14 @@ public:
             infoq.emplace_back(stream.pop());
             infoq.emplace_back(stream.pop());
             std::cout << "First timestamp is " << infoq[0].timestamp << '\n';
-            while (infoq[0].timestamp == 0 || infoq[1].timestamp == 0
+            while (infoq[0].samples == 0 || infoq[1].samples == 0
                    || infoq[1].timestamp != infoq[0].timestamp + infoq[0].samples)
             {
                 infoq.pop_front();
                 infoq.emplace_back(stream.pop());
             }
-            next_timestamp = infoq[0].timestamp;
-            first_timestamp = next_timestamp;
+            first_timestamp = infoq[0].timestamp;
+            samples = infoq[0].samples;
             std::cout << "First synchronised timestamp is " << first_timestamp << '\n';
         }
         catch (spead2::ringbuffer_stopped)
@@ -189,51 +214,129 @@ public:
     }
 
     // Returns empty batch on reaching the end
-    heap_info_batch next_batch()
+    heap_batch next_batch()
     {
         constexpr int batch_size = 32;
-        heap_info_batch batch;
-        if (!finished)
+        heap_batch batch;
+        batch.reserve(batch_size);
+        while (!finished && batch.size() < batch_size)
         {
-            for (int i = 0; i < batch_size; i++)
+            if (n_heaps >= max_heaps)
             {
-                if (n_heaps >= max_heaps)
+                std::cout << "Stopping after " << max_heaps << " heaps\n";
+                finished = true;
+                break;
+            }
+            if (infoq.empty())
+            {
+                try
                 {
-                    std::cout << "Stopping after " << max_heaps << " heaps\n";
+                    infoq.emplace_back(stream.pop());
+                }
+                catch (spead2::ringbuffer_stopped)
+                {
+                    std::cout << "Stream ended after " << n_heaps << " heaps\n";
                     finished = true;
                     break;
                 }
-                if (infoq.empty())
-                {
-                    try
-                    {
-                        infoq.emplace_back(stream.pop());
-                    }
-                    catch (spead2::ringbuffer_stopped)
-                    {
-                        std::cout << "Stream ended after " << n_heaps << " heaps\n";
-                        finished = true;
-                        break;
-                    }
-                }
-                heap_info info = std::move(infoq[0]);
-                infoq.pop_front();
-                if (info.timestamp != next_timestamp)
-                {
-                    std::cout.flush();
-                    std::cerr << "Timestamps do not match up, aborting\n"
-                        << "Expected " << next_timestamp << ", have " << info.timestamp << '\n';
-                    finished = true;
-                    break;
-                }
+            }
+            heap_info info = std::move(infoq[0]);
+            infoq.pop_front();
+            if (info.samples > 0)   // Skip over non-data heaps e.g. descriptors
+            {
                 n_heaps++;
-                next_timestamp += info.samples;
                 batch.push_back(std::move(info));
             }
         }
         return batch;
     }
 };
+
+class writer
+{
+private:
+    std::ofstream out;
+    std::uint64_t first_timestamp;
+    std::size_t samples;    // samples per heap - must be constant
+    std::unordered_set<std::uint64_t> seen;
+    std::uint64_t n_elements = 0;
+
+    static constexpr int header_size = 96;
+
+public:
+    writer(const std::string &filename, std::uint64_t first_timestamp, std::size_t samples);
+    void write(const decoded_info &heap);
+    void close();
+    void report();
+};
+
+constexpr int writer::header_size;
+
+writer::writer(const std::string &filename, std::uint64_t first_timestamp, std::size_t samples)
+    : out(filename, std::ios::out | std::ios::binary),
+    first_timestamp(first_timestamp),
+    samples(samples)
+{
+    out.exceptions(std::ios::failbit | std::ios::badbit);
+    // Make space for the header
+    out.seekp(header_size);
+}
+
+void writer::write(const decoded_info &heap)
+{
+    if (heap.timestamp < first_timestamp)
+    {
+        std::cerr << "Warning: discarding heap with timestamp "
+            << heap.timestamp << " which is before start\n";
+        return;
+    }
+    if (heap.data.size() != samples)
+    {
+        std::cerr << "Warning: discarding heap with " << heap.data.size()
+            << ", expected " << samples << '\n';
+        return;
+    }
+    if (!seen.insert(heap.timestamp).second)
+    {
+        std::cerr << "Warning: discarding heap with duplicate timestamp "
+            << heap.timestamp << '\n';
+        return;
+    }
+    std::uint64_t position = heap.timestamp - first_timestamp;
+    constexpr std::size_t elem_size = sizeof(decltype(heap.data)::value_type);
+    out.seekp(header_size + position * elem_size);
+    out.write(reinterpret_cast<const char *>(heap.data.data()), heap.data.size() * elem_size);
+    seen.insert(heap.timestamp);
+    n_elements = std::max(n_elements, position + heap.data.size());
+}
+
+void writer::close()
+{
+    // Write in the header
+    out.seekp(0);
+    char header_start[10] = "\x93NUMPY\x01\x00";
+    header_start[8] = header_size - 10;
+    header_start[9] = 0;
+    out.write(header_start, 10);
+    out << "{'descr': '<i2', 'fortran_order': False, 'shape': ("
+        << n_elements << ",) }";
+    if (out.tellp() >= header_size)
+        throw std::runtime_error("Oops, header was too big for reserved space! File is corrupted!");
+    while (out.tellp() < header_size - 1)
+        out << ' ';
+    out << '\n';
+    out.close();
+}
+
+void writer::report()
+{
+    std::uint64_t captured_samples = seen.size() * samples;
+    std::uint64_t missing_samples = n_elements - captured_samples;
+    double ratio = double(missing_samples) / n_elements;
+    std::cout << "Converted " << captured_samples << " samples, "
+        << missing_samples << " missing (" << ratio * 100
+        << "%), from timestamp " << first_timestamp << '\n';
+}
 
 template<typename T>
 static po::typed_value<T> *make_opt(T &var)
@@ -304,64 +407,44 @@ int main(int argc, char **argv)
     tbb::task_scheduler_init init_tbb(n_threads);
 
     loader load(opts);
+    writer out(opts.output_file, load.first_timestamp, load.samples);
 
-    const int header_size = 96;
-    std::ofstream out(opts.output_file, std::ios::out | std::ios::binary);
-    out.exceptions(std::ios::failbit | std::ios::badbit);
-    // Make space for the header
-    out.seekp(header_size);
-    std::uint64_t n_elements = 0;
-
-    auto read_filter = [&] (tbb::flow_control &fc) -> std::shared_ptr<heap_info_batch>
+    auto read_filter = [&] (tbb::flow_control &fc) -> std::shared_ptr<heap_batch>
     {
-        std::shared_ptr<heap_info_batch> batch = std::make_shared<heap_info_batch>(load.next_batch());
+        std::shared_ptr<heap_batch> batch = std::make_shared<heap_batch>(load.next_batch());
         if (batch->empty())
             fc.stop();
         return batch;
     };
 
-    auto decode_filter = [&](std::shared_ptr<heap_info_batch> batch) -> std::shared_ptr<decoded_batch>
+    auto decode_filter = [&](std::shared_ptr<heap_batch> batch) -> std::shared_ptr<decoded_batch>
     {
         std::shared_ptr<decoded_batch> out = std::make_shared<decoded_batch>();
         for (const heap_info &info : *batch)
-            out->push_back(decode_10bit(info.data, info.length, opts.non_icd));
+        {
+            decoded_info out_info;
+            out_info.timestamp = info.timestamp;
+            out_info.data = decode_10bit(info.data, info.length, opts.non_icd);
+            out->emplace_back(std::move(out_info));
+        }
         return out;
     };
 
     auto write_filter = [&](std::shared_ptr<decoded_batch> batch)
     {
-        for (const std::vector<int16_t> &decoded : *batch)
-        {
-            out.write(reinterpret_cast<const char *>(decoded.data()),
-                      decoded.size() * sizeof(decoded[0]));
-            n_elements += decoded.size();
-        }
+        for (const decoded_info &decoded : *batch)
+            out.write(decoded);
     };
 
     tbb::parallel_pipeline(16,
-        tbb::make_filter<void, std::shared_ptr<heap_info_batch>>(
+        tbb::make_filter<void, std::shared_ptr<heap_batch>>(
             tbb::filter::serial_in_order, read_filter)
-        & tbb::make_filter<std::shared_ptr<heap_info_batch>, std::shared_ptr<decoded_batch>>(
+        & tbb::make_filter<std::shared_ptr<heap_batch>, std::shared_ptr<decoded_batch>>(
             tbb::filter::parallel, decode_filter)
         & tbb::make_filter<std::shared_ptr<decoded_batch>, void>(
-            tbb::filter::serial_in_order, write_filter));
+            tbb::filter::serial, write_filter));
 
     // Write in the header
-    out.seekp(0);
-    char header_start[10] = "\x93NUMPY\x01\x00";
-    header_start[8] = header_size - 10;
-    header_start[9] = 0;
-    out.write(header_start, 10);
-    out << "{'descr': '<i2', 'fortran_order': False, 'shape': ("
-        << n_elements << ",) }";
-    if (out.tellp() >= header_size)
-    {
-        std::cerr << "Oops, header was too big for reserved space! File is corrupted!\n";
-        return 1;
-    }
-    while (out.tellp() < header_size - 1)
-        out << ' ';
-    out << '\n';
     out.close();
     std::cout << "Header successfully written\n";
 
@@ -371,7 +454,6 @@ int main(int argc, char **argv)
     timestamp_file << load.first_timestamp << '\n';
     timestamp_file.close();
     std::cout << "Timestamp file written\n\n";
-    std::cout << "Completed capture+conversion of " << load.n_heaps
-        << " heaps from timestamp " << load.first_timestamp << '\n';
+    out.report();
     return 0;
 }
