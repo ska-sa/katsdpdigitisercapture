@@ -293,7 +293,7 @@ void writer::write(const decoded_info &heap)
     if (heap.data.size() != samples)
     {
         std::cerr << "Warning: discarding heap with " << heap.data.size()
-            << ", expected " << samples << '\n';
+            << " samples, expected " << samples << '\n';
         return;
     }
     if (!seen.insert(heap.timestamp).second)
