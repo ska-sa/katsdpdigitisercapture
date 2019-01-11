@@ -25,8 +25,9 @@ RUN make -C /tmp/install/spead2/build DESTDIR=/tmp/install/spead2-install instal
 USER kat
 
 # Install Python dependencies
-ENV PATH="$PATH_PYTHON2" VIRTUAL_ENV="$VIRTUAL_ENV_PYTHON2"
-RUN pip install netifaces==0.10.4
+ENV PATH="$PATH_PYTHON3" VIRTUAL_ENV="$VIRTUAL_ENV_PYTHON3"
+COPY requirements.txt /tmp/install/requirements.txt
+RUN pip install -r /tmp/install/requirements.txt
 
 # Compile digitiser_decode
 COPY --chown=kat:kat . /tmp/install/digitiser_decode
@@ -48,5 +49,5 @@ USER kat
 # Install
 COPY --from=build /tmp/install/spead2-install /
 COPY --from=build /tmp/install/digitiser_decode/digitiser_decode /tmp/install/digitiser_decode/digitiser_capture.py /usr/local/bin/
-COPY --from=build --chown=kat:kat /home/kat/ve /home/kat/ve
-ENV PATH="$PATH_PYTHON2" VIRTUAL_ENV="$VIRTUAL_ENV_PYTHON2"
+COPY --from=build --chown=kat:kat /home/kat/ve3 /home/kat/ve3
+ENV PATH="$PATH_PYTHON3" VIRTUAL_ENV="$VIRTUAL_ENV_PYTHON3"
