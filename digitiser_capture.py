@@ -8,18 +8,7 @@ import signal
 import sys
 import tempfile
 
-
-def option_pair(base_type):
-    def callback(value):
-        parts = value.split(',', 1)
-        if len(parts) == 1:
-            out = base_type(parts[0])
-            return out, out
-        else:
-            out0 = base_type(parts[0])
-            out1 = base_type(parts[1])
-            return out0, out1
-    return callback
+from katsdptelstate.endpoint import endpoint_list_parser
 
 
 def interface_address(iface):
@@ -28,9 +17,9 @@ def interface_address(iface):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('address', type=option_pair(str), help='Multicast groups')
+    parser.add_argument('endpoints', type=endpoint_list_parser(7148), help='Multicast groups',
+                        metavar='ADDR+N:PORT')
     parser.add_argument('output', type=str, help='Output file')
-    parser.add_argument('--port', type=option_pair(int), default='7148', help='UDP ports')
     parser.add_argument('--interface', type=str, default='p5p1',
                         help='Network interfaces')
     parser.add_argument('--tmpdir', type=str, default='/mnt/ramdisk0',
@@ -57,16 +46,17 @@ def main():
         cores = [int(x) for x in cores.decode('ascii').split(',')]
         while len(cores) < 3:
             cores += cores
-        mcdump = subprocess.Popen(
-            ['hwloc-bind', 'os={}'.format(args.interface), '--',
-             'mcdump', '-i', interface_address(args.interface),
-             '--collect-cpu', str(cores[0]),
-             '--network-cpu', str(cores[1]),
-             '--disk-cpu', str(cores[2]),
-             pcap_file.name,
-             '{}:{}'.format(args.address[0], args.port[0]),
-             '{}:{}'.format(args.address[1], args.port[1])] +
-            (['--direct-io'] if args.direct_io else []))
+        mcdump_args = [
+            'hwloc-bind', 'os={}'.format(args.interface), '--',
+            'mcdump', '-i', interface_address(args.interface),
+            '--collect-cpu', str(cores[0]),
+            '--network-cpu', str(cores[1]),
+            '--disk-cpu', str(cores[2]),
+            pcap_file.name]
+        mcdump_args += [str(endpoint) for endpoint in args.endpoints]
+        if args.direct_io:
+            mcdump_args.append('--direct-io')
+        mcdump = subprocess.Popen(mcdump_args)
         time.sleep(args.seconds)
         mcdump.send_signal(signal.SIGINT)
         ret = mcdump.wait()

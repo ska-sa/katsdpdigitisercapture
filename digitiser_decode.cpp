@@ -30,6 +30,12 @@ namespace po = boost::program_options;
 # error "Only little endian is currently supported"
 #endif
 
+/* Number of multicast addresses used. It is acceptable if it is a smaller
+ * power of two, although it will cause a few packets to be unnecessarily
+ * discarded from the front.
+ */
+static constexpr int MAX_ADDRESSES = 8;
+
 /***************************************************************************/
 
 /* Take buffer of packed 10-bit signed values (big-endian) and return them as 16-bit
@@ -190,16 +196,27 @@ public:
 
         try
         {
-            /* Two multicast groups are interleaved, and the multicast
+            /* N multicast groups are interleaved, and the multicast
              * subscriptions may have kicked in at different times. Proceed
-             * until we see two consecutive samples.
+             * until we have seen data from all of them.
              */
             infoq.emplace_back(stream.pop());
-            infoq.emplace_back(stream.pop());
             std::cout << "First timestamp is " << infoq[0].timestamp << '\n';
-            while (infoq[0].samples == 0 || infoq[1].samples == 0
-                   || infoq[1].timestamp != infoq[0].timestamp + infoq[0].samples)
+            std::vector<bool> seen(MAX_ADDRESSES);
+            int waiting = MAX_ADDRESSES;
+            while (true)
             {
+                if (infoq[0].samples != 0)
+                {
+                    int phase = (infoq[0].timestamp / infoq[0].samples) % MAX_ADDRESSES;
+                    if (!seen[phase])
+                    {
+                        seen[phase] = true;
+                        waiting--;
+                        if (waiting == 0)
+                            break;
+                    }
+                }
                 infoq.pop_front();
                 infoq.emplace_back(stream.pop());
             }
