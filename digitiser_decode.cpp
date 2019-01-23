@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <memory>
 #include <vector>
+#include <unordered_set>
 #include <limits>
 #include <tbb/pipeline.h>
 #include <tbb/task_scheduler_init.h>
