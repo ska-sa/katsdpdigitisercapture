@@ -11,7 +11,7 @@ USER kat
 # Check out and build spead2
 RUN mkdir -p /tmp/install
 WORKDIR /tmp/install
-RUN git clone --single-branch --branch v1.7.0 --depth 1 https://github.com/ska-sa/spead2
+RUN git clone --single-branch --branch v1.11.2 --depth 1 https://github.com/ska-sa/spead2
 WORKDIR /tmp/install/spead2
 RUN mkdir build
 RUN ./bootstrap.sh --no-python
