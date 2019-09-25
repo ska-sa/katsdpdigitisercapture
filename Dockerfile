@@ -1,5 +1,6 @@
-FROM sdp-docker-registry.kat.ac.za:5000/docker-base-build as build
-MAINTAINER Bruce Merry "bmerry@ska.ac.za"
+ARG KATSDPDOCKERBASE_REGISTRY=quay.io/ska-sa
+
+FROM $KATSDPDOCKERBASE_REGISTRY/docker-base-build as build
 
 # Install build dependencies
 USER root
@@ -35,8 +36,8 @@ RUN make -C /tmp/install/digitiser_decode
 
 #######################################################################
 
-FROM sdp-docker-registry.kat.ac.za:5000/docker-base-runtime
-MAINTAINER Bruce Merry "bmerry@ska.ac.za"
+FROM $KATSDPDOCKERBASE_REGISTRY/docker-base-runtime
+LABEL maintainer="sdpdev+katsdpdigitisercapture@ska.ac.za"
 
 # Install run-time dependencies (netbase is needed because pcap looks up
 # protocols in /etc/protocols).
