@@ -12,17 +12,17 @@ USER kat
 # Check out and build spead2
 RUN mkdir -p /tmp/install
 WORKDIR /tmp/install
-RUN git clone --single-branch --branch v1.11.2 --depth 1 https://github.com/ska-sa/spead2
-WORKDIR /tmp/install/spead2
+RUN wget https://github.com/ska-sa/spead2/releases/download/v2.1.2/spead2-2.1.2.tar.gz
+RUN tar -zxf spead2-2.1.2.tar.gz
+WORKDIR /tmp/install/spead2-2.1.2
 RUN mkdir build
-RUN ./bootstrap.sh --no-python
-WORKDIR /tmp/install/spead2/build
+WORKDIR /tmp/install/spead2-2.1.2/build
 RUN ../configure --with-ibv --enable-lto AR=gcc-ar RANLIB=gcc-ranlib
 RUN make -j8
 USER root
-RUN make -C /tmp/install/spead2/build install
+RUN make -C /tmp/install/spead2-2.1.2/build install
 # Install in a separate directory for copying to the runtime image
-RUN make -C /tmp/install/spead2/build DESTDIR=/tmp/install/spead2-install install
+RUN make -C /tmp/install/spead2-2.1.2/build DESTDIR=/tmp/install/spead2-install install
 USER kat
 
 # Install Python dependencies
@@ -51,4 +51,8 @@ USER kat
 COPY --from=build /tmp/install/spead2-install /
 COPY --from=build /tmp/install/digitiser_decode/digitiser_decode /tmp/install/digitiser_decode/digitiser_capture.py /usr/local/bin/
 COPY --from=build --chown=kat:kat /home/kat/ve3 /home/kat/ve3
+# Give mcdump the necessary permission
+USER root
+RUN setcap cap_net_raw+ep /usr/local/bin/mcdump
+USER kat
 ENV PATH="$PATH_PYTHON3" VIRTUAL_ENV="$VIRTUAL_ENV_PYTHON3"
