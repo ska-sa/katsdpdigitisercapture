@@ -12,17 +12,17 @@ USER kat
 # Check out and build spead2
 RUN mkdir -p /tmp/install
 WORKDIR /tmp/install
-RUN wget https://github.com/ska-sa/spead2/releases/download/v2.1.2/spead2-2.1.2.tar.gz
-RUN tar -zxf spead2-2.1.2.tar.gz
-WORKDIR /tmp/install/spead2-2.1.2
+RUN wget https://github.com/ska-sa/spead2/releases/download/v3.2.0/spead2-3.2.0.tar.gz
+RUN tar -zxf spead2-3.2.0.tar.gz
+WORKDIR /tmp/install/spead2-3.2.0
 RUN mkdir build
-WORKDIR /tmp/install/spead2-2.1.2/build
+WORKDIR /tmp/install/spead2-3.2.0/build
 RUN ../configure --with-ibv --enable-lto AR=gcc-ar RANLIB=gcc-ranlib
 RUN make -j8
 USER root
-RUN make -C /tmp/install/spead2-2.1.2/build install
+RUN make -C /tmp/install/spead2-3.2.0/build install
 # Install in a separate directory for copying to the runtime image
-RUN make -C /tmp/install/spead2-2.1.2/build DESTDIR=/tmp/install/spead2-install install
+RUN make -C /tmp/install/spead2-3.2.0/build DESTDIR=/tmp/install/spead2-install install
 USER kat
 
 # Install Python dependencies
