@@ -191,7 +191,10 @@ public:
 
     explicit loader(const options &opts)
         : thread_pool(),
-        stream(thread_pool, 2, 128), max_heaps(opts.max_heaps)
+        stream(thread_pool,
+               spead2::recv::stream_config().set_max_heaps(2),
+               spead2::recv::ring_stream_config().set_heaps(128)),
+        max_heaps(opts.max_heaps)
     {
         stream.emplace_reader<spead2::recv::udp_pcap_file_reader>(opts.input_file);
 
@@ -225,7 +228,7 @@ public:
             samples = infoq[0].samples;
             std::cout << "First synchronised timestamp is " << first_timestamp << '\n';
         }
-        catch (spead2::ringbuffer_stopped)
+        catch (spead2::ringbuffer_stopped &)
         {
             throw std::runtime_error("End of stream reached before stream synchronisation");
         }
@@ -251,7 +254,7 @@ public:
                 {
                     infoq.emplace_back(stream.pop());
                 }
-                catch (spead2::ringbuffer_stopped)
+                catch (spead2::ringbuffer_stopped &)
                 {
                     std::cout << "Stream ended after " << n_heaps << " heaps\n";
                     finished = true;
