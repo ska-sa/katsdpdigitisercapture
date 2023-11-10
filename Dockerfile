@@ -5,7 +5,7 @@ FROM $KATSDPDOCKERBASE_REGISTRY/docker-base-build as build
 # Install build dependencies
 USER root
 RUN apt-get -y update && apt-get --no-install-recommends -y install \
-        libpcap-dev libtbb-dev libboost-program-options-dev \
+        libpcap-dev libboost-program-options-dev \
         autoconf automake
 USER kat
 
@@ -43,7 +43,7 @@ LABEL maintainer="sdpdev+katsdpdigitisercapture@ska.ac.za"
 # protocols in /etc/protocols).
 USER root
 RUN apt-get -y update && apt-get --no-install-recommends -y install \
-        libpcap0.8 libtbb2 hwloc-nox netbase && \
+        libpcap0.8 hwloc-nox netbase && \
     rm -rf /var/lib/apt/lists/*
 USER kat
 

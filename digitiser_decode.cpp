@@ -14,8 +14,6 @@
 #include <vector>
 #include <unordered_set>
 #include <limits>
-#include <tbb/pipeline.h>
-#include <tbb/task_scheduler_init.h>
 #include <immintrin.h>
 #include <boost/lexical_cast.hpp>
 #include <boost/program_options.hpp>
@@ -561,49 +559,23 @@ static options parse_options(int argc, char **argv)
 int main(int argc, char **argv)
 {
     options opts = parse_options(argc, argv);
-    // Leave 1 core free for decoding the SPEAD stream
-    int n_threads = tbb::task_scheduler_init::default_num_threads() - 1;
-    if (n_threads < 1)
-        n_threads = 1;
-    tbb::task_scheduler_init init_tbb(n_threads);
 
     loader load(opts);
     writer out(opts.output_file, load.first_timestamp, load.samples);
 
-    auto read_filter = [&] (tbb::flow_control &fc) -> std::shared_ptr<heap_batch>
+    while (true)
     {
-        std::shared_ptr<heap_batch> batch = std::make_shared<heap_batch>(load.next_batch());
-        if (batch->empty())
-            fc.stop();
-        return batch;
-    };
-
-    auto decode_filter = [&](std::shared_ptr<heap_batch> batch) -> std::shared_ptr<decoded_batch>
-    {
-        std::shared_ptr<decoded_batch> out = std::make_shared<decoded_batch>();
-        for (const heap_info &info : *batch)
+        heap_batch batch{load.next_batch()};
+        if (batch.empty())
+            break;
+        for (const heap_info &info : batch)
         {
             decoded_info out_info;
             out_info.timestamp = info.timestamp;
             out_info.data = decode_10bit(info.data, info.length);
-            out->emplace_back(std::move(out_info));
+            out.write(out_info);
         }
-        return out;
-    };
-
-    auto write_filter = [&](std::shared_ptr<decoded_batch> batch)
-    {
-        for (const decoded_info &decoded : *batch)
-            out.write(decoded);
-    };
-
-    tbb::parallel_pipeline(16,
-        tbb::make_filter<void, std::shared_ptr<heap_batch>>(
-            tbb::filter::serial_in_order, read_filter)
-        & tbb::make_filter<std::shared_ptr<heap_batch>, std::shared_ptr<decoded_batch>>(
-            tbb::filter::parallel, decode_filter)
-        & tbb::make_filter<std::shared_ptr<decoded_batch>, void>(
-            tbb::filter::serial, write_filter));
+    }
 
     // Write in the header
     out.close();
