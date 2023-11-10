@@ -231,6 +231,7 @@ static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::siz
         _mm_storeu_si128(y_ptr + 0xe, _mm256_extracti128_si256(y01234567_p3, 1));
         _mm_storeu_si128(y_ptr + 0xf, _mm256_extracti128_si256(y89abcdef_p3, 1));
     }
+    _mm256_zeroupper();
     return out;
 }
 
