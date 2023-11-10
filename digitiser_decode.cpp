@@ -91,31 +91,61 @@ static inline __m256i extr2(__m256i in0, __m256i in1)
     return _mm256_or_si256(part, _mm256_srli_epi32(in1, 54 - left));
 }
 
-// AVX-2 optimised version of the above
+/* AVX-2 optimised version of the decoding. It loads 32-bit integers and does
+ * shifting to extract the relevant bits. Gather instructions are used to
+ * transpose the 32-bit integers on load, so that consecutive 32-bit values are
+ * in consecutive registers/variables. To extract a 10-bit field, there are two
+ * cases:
+ *
+ * 1. The 10-bit value is entirely contained in the 32-bit field. This is extracted
+ *    by shifting left by some number of bits, then shifting right (with sign
+ *    extension). All the unwanted bits fall out the ends.
+ * 2. The 10-bit value is split across two 32-bit fields. In this case both fields
+ *    need shifting to extract the relevant bits, which are then ORed together. The
+ *    second field needs a logical (unsigned) right shift so that it doesn't get
+ *    sign extension.
+ *
+ * Since AVX2 doesn't support scatter instructions, a large part of the
+ * implementation is dedicated to transposing the data so that 16-bit outputs
+ * that need to be contiguous in memory get placed contiguously in the
+ * registers.
+ */
 [[gnu::target("avx2")]]
 static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::size_t length)
 {
     std::size_t out_length = length * 8 / 10;
     std::vector<std::int16_t> out(out_length);
 
-    std::size_t blocks = out_length / 128;
+    std::size_t blocks = out_length / 128;  // 128 is number of samples per loop iteration
     // shuffle control to swap 32-bit values from big to little endian
     __m256i bswap = _mm256_set_epi32(
         0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203,
         0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203
     );
+
+    /* These pointers are not aligned, which is okay because they're used with
+     * instructions that allow unaligned access.
+     */
     const std::int32_t *x_ptr = (const std::int32_t *) data;
     __m128i *y_ptr = (__m128i *) out.data();
+    // Offsets (in 32-bit words) at which the lanes in gather instructions
+    // are loaded.
     __m256i offsets = _mm256_set_epi32(35, 30, 25, 20, 15, 10, 5, 0);
 
     for (size_t i = 0; i < blocks; i++, x_ptr += 40, y_ptr += 16)
     {
+        // Load 32-bit values and convert from big endian to little
         __m256i a0 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 0, offsets, 4), bswap);
         __m256i a1 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 1, offsets, 4), bswap);
         __m256i a2 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 2, offsets, 4), bswap);
         __m256i a3 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 3, offsets, 4), bswap);
         __m256i a4 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 4, offsets, 4), bswap);
 
+        /* Extract the 10-bit values. At the end of this operation, each 32-bit
+         * element contains a 10-bit value (sign-extended). These operations
+         * are easiest to think of as if they were scalar. The different SIMD
+         * lanes correspond to different contiguous 160-bit blocks of input.
+         */
         __m256i y0 = extr<0>(a0);
         __m256i y1 = extr<10>(a0);
         __m256i y2 = extr<20>(a0);
@@ -133,8 +163,16 @@ static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::siz
         __m256i ye = extr<12>(a4);
         __m256i yf = extr<22>(a4);
 
-        // Naming convention: pq_rs means that p and q are interleaved, followed
-        // by r and s interleaved. A suffix of _p<n> means part n.
+        /* Now the transposition/interleaving starts. The pack/unpack
+         * instructions in AVX are weird: they treat each YMM register as two
+         * separate 128-bit registers, and the instruction occurs independent
+         * on the lower and upper halves. Any descriptions below should thus be
+         * treated as applying separately to each half, and the lower halves
+         * always jointly contain the first half of the output.
+         */
+
+        // Cast down from 32-bit to 16-bit. Each variable yU_V contains
+        // all values for U followed by those for V (not interleaved).
         __m256i y0_8 = _mm256_packs_epi32(y0, y8);
         __m256i y1_9 = _mm256_packs_epi32(y1, y9);
         __m256i y2_a = _mm256_packs_epi32(y2, ya);
@@ -144,6 +182,7 @@ static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::siz
         __m256i y6_e = _mm256_packs_epi32(y6, ye);
         __m256i y7_f = _mm256_packs_epi32(y7, yf);
 
+        // yUV alternates between values for U and for V
         __m256i y01 = _mm256_unpacklo_epi16(y0_8, y1_9);
         __m256i y23 = _mm256_unpacklo_epi16(y2_a, y3_b);
         __m256i y45 = _mm256_unpacklo_epi16(y4_c, y5_d);
@@ -153,6 +192,7 @@ static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::siz
         __m256i ycd = _mm256_unpackhi_epi16(y4_c, y5_d);
         __m256i yef = _mm256_unpackhi_epi16(y6_e, y7_f);
 
+        // yABCD_pX is the X'th value containing interleaved A, B, C, and D components.
         __m256i y0123_p0 = _mm256_unpacklo_epi32(y01, y23);
         __m256i y0123_p1 = _mm256_unpackhi_epi32(y01, y23);
         __m256i y4567_p0 = _mm256_unpacklo_epi32(y45, y67);
@@ -171,6 +211,9 @@ static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::siz
         __m256i y89abcdef_p2 = _mm256_unpacklo_epi64(y89ab_p1, ycdef_p1);
         __m256i y89abcdef_p3 = _mm256_unpackhi_epi64(y89ab_p1, ycdef_p1);
 
+        /* Write back results. As noted above, the lower halves contain all the
+         * data for the first half of the output.
+         */
         _mm_storeu_si128(y_ptr + 0x0, _mm256_extracti128_si256(y01234567_p0, 0));
         _mm_storeu_si128(y_ptr + 0x1, _mm256_extracti128_si256(y89abcdef_p0, 0));
         _mm_storeu_si128(y_ptr + 0x2, _mm256_extracti128_si256(y01234567_p1, 0));
