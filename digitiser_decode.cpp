@@ -16,6 +16,7 @@
 #include <limits>
 #include <tbb/pipeline.h>
 #include <tbb/task_scheduler_init.h>
+#include <immintrin.h>
 #include <boost/lexical_cast.hpp>
 #include <boost/program_options.hpp>
 
@@ -42,6 +43,7 @@ static constexpr int MAX_ADDRESSES = 8;
 /* Take buffer of packed 10-bit signed values (big-endian) and return them as 16-bit
  * values.
  */
+[[gnu::target("default")]]
 static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::size_t length)
 {
     std::size_t out_length = length * 8 / 10;
@@ -65,6 +67,126 @@ static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::siz
                 value -= 1024;
             out.push_back(value);
         }
+    }
+    return out;
+}
+
+template<int left>
+[[gnu::target("avx2")]]
+static inline __m256i extr(__m256i in)
+{
+    static_assert(0 <= left && left <= 22, "left is out of ange");
+    if (left)
+        return _mm256_srai_epi32(_mm256_slli_epi32(in, left), 22);
+    else
+        return _mm256_srai_epi32(in, 22);
+}
+
+template<int left>
+[[gnu::target("avx2")]]
+static inline __m256i extr2(__m256i in0, __m256i in1)
+{
+    static_assert(22 < left && left < 32, "left is out of ange");
+    __m256i part = _mm256_srai_epi32(_mm256_slli_epi32(in0, left), 22);
+    return _mm256_or_si256(part, _mm256_srli_epi32(in1, 54 - left));
+}
+
+// AVX-2 optimised version of the above
+[[gnu::target("avx2")]]
+static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::size_t length)
+{
+    std::size_t out_length = length * 8 / 10;
+    std::vector<std::int16_t> out(out_length);
+
+    std::size_t blocks = out_length / 128;
+    // shuffle control to swap 32-bit values from big to little endian
+    __m256i bswap = _mm256_set_epi32(
+        0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203,
+        0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203
+    );
+    const std::int32_t *x_ptr = (const std::int32_t *) data;
+    __m128i *y_ptr = (__m128i *) out.data();
+    __m256i offsets = _mm256_set_epi32(35, 30, 25, 20, 15, 10, 5, 0);
+
+    for (size_t i = 0; i < blocks; i++, x_ptr += 40, y_ptr += 16)
+    {
+        __m256i a0 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 0, offsets, 4), bswap);
+        __m256i a1 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 1, offsets, 4), bswap);
+        __m256i a2 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 2, offsets, 4), bswap);
+        __m256i a3 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 3, offsets, 4), bswap);
+        __m256i a4 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 4, offsets, 4), bswap);
+
+        __m256i y0 = extr<0>(a0);
+        __m256i y1 = extr<10>(a0);
+        __m256i y2 = extr<20>(a0);
+        __m256i y3 = extr2<30>(a0, a1);
+        __m256i y4 = extr<8>(a1);
+        __m256i y5 = extr<18>(a1);
+        __m256i y6 = extr2<28>(a1, a2);
+        __m256i y7 = extr<6>(a2);
+        __m256i y8 = extr<16>(a2);
+        __m256i y9 = extr2<26>(a2, a3);
+        __m256i ya = extr<4>(a3);
+        __m256i yb = extr<14>(a3);
+        __m256i yc = extr2<24>(a3, a4);
+        __m256i yd = extr<2>(a4);
+        __m256i ye = extr<12>(a4);
+        __m256i yf = extr<22>(a4);
+
+        // Naming convention: pq_rs means that p and q are interleaved, followed
+        // by r and s interleaved. A suffix of _p<n> means part n.
+        __m256i y0_8 = _mm256_packs_epi32(y0, y8);
+        __m256i y1_9 = _mm256_packs_epi32(y1, y9);
+        __m256i y2_a = _mm256_packs_epi32(y2, ya);
+        __m256i y3_b = _mm256_packs_epi32(y3, yb);
+        __m256i y4_c = _mm256_packs_epi32(y4, yc);
+        __m256i y5_d = _mm256_packs_epi32(y5, yd);
+        __m256i y6_e = _mm256_packs_epi32(y6, ye);
+        __m256i y7_f = _mm256_packs_epi32(y7, yf);
+
+        __m256i y01 = _mm256_unpacklo_epi16(y0_8, y1_9);
+        __m256i y23 = _mm256_unpacklo_epi16(y2_a, y3_b);
+        __m256i y45 = _mm256_unpacklo_epi16(y4_c, y5_d);
+        __m256i y67 = _mm256_unpacklo_epi16(y6_e, y7_f);
+        __m256i y89 = _mm256_unpackhi_epi16(y0_8, y1_9);
+        __m256i yab = _mm256_unpackhi_epi16(y2_a, y3_b);
+        __m256i ycd = _mm256_unpackhi_epi16(y4_c, y5_d);
+        __m256i yef = _mm256_unpackhi_epi16(y6_e, y7_f);
+
+        __m256i y0123_p0 = _mm256_unpacklo_epi32(y01, y23);
+        __m256i y0123_p1 = _mm256_unpackhi_epi32(y01, y23);
+        __m256i y4567_p0 = _mm256_unpacklo_epi32(y45, y67);
+        __m256i y4567_p1 = _mm256_unpackhi_epi32(y45, y67);
+        __m256i y89ab_p0 = _mm256_unpacklo_epi32(y89, yab);
+        __m256i y89ab_p1 = _mm256_unpackhi_epi32(y89, yab);
+        __m256i ycdef_p0 = _mm256_unpacklo_epi32(ycd, yef);
+        __m256i ycdef_p1 = _mm256_unpackhi_epi32(ycd, yef);
+
+        __m256i y01234567_p0 = _mm256_unpacklo_epi64(y0123_p0, y4567_p0);
+        __m256i y01234567_p1 = _mm256_unpackhi_epi64(y0123_p0, y4567_p0);
+        __m256i y01234567_p2 = _mm256_unpacklo_epi64(y0123_p1, y4567_p1);
+        __m256i y01234567_p3 = _mm256_unpackhi_epi64(y0123_p1, y4567_p1);
+        __m256i y89abcdef_p0 = _mm256_unpacklo_epi64(y89ab_p0, ycdef_p0);
+        __m256i y89abcdef_p1 = _mm256_unpackhi_epi64(y89ab_p0, ycdef_p0);
+        __m256i y89abcdef_p2 = _mm256_unpacklo_epi64(y89ab_p1, ycdef_p1);
+        __m256i y89abcdef_p3 = _mm256_unpackhi_epi64(y89ab_p1, ycdef_p1);
+
+        _mm_storeu_si128(y_ptr + 0x0, _mm256_extracti128_si256(y01234567_p0, 0));
+        _mm_storeu_si128(y_ptr + 0x1, _mm256_extracti128_si256(y89abcdef_p0, 0));
+        _mm_storeu_si128(y_ptr + 0x2, _mm256_extracti128_si256(y01234567_p1, 0));
+        _mm_storeu_si128(y_ptr + 0x3, _mm256_extracti128_si256(y89abcdef_p1, 0));
+        _mm_storeu_si128(y_ptr + 0x4, _mm256_extracti128_si256(y01234567_p2, 0));
+        _mm_storeu_si128(y_ptr + 0x5, _mm256_extracti128_si256(y89abcdef_p2, 0));
+        _mm_storeu_si128(y_ptr + 0x6, _mm256_extracti128_si256(y01234567_p3, 0));
+        _mm_storeu_si128(y_ptr + 0x7, _mm256_extracti128_si256(y89abcdef_p3, 0));
+        _mm_storeu_si128(y_ptr + 0x8, _mm256_extracti128_si256(y01234567_p0, 1));
+        _mm_storeu_si128(y_ptr + 0x9, _mm256_extracti128_si256(y89abcdef_p0, 1));
+        _mm_storeu_si128(y_ptr + 0xa, _mm256_extracti128_si256(y01234567_p1, 1));
+        _mm_storeu_si128(y_ptr + 0xb, _mm256_extracti128_si256(y89abcdef_p1, 1));
+        _mm_storeu_si128(y_ptr + 0xc, _mm256_extracti128_si256(y01234567_p2, 1));
+        _mm_storeu_si128(y_ptr + 0xd, _mm256_extracti128_si256(y89abcdef_p2, 1));
+        _mm_storeu_si128(y_ptr + 0xe, _mm256_extracti128_si256(y01234567_p3, 1));
+        _mm_storeu_si128(y_ptr + 0xf, _mm256_extracti128_si256(y89abcdef_p3, 1));
     }
     return out;
 }
@@ -343,11 +465,6 @@ template<typename T>
 static po::typed_value<T> *make_opt(T &var)
 {
     return po::value<T>(&var)->default_value(var);
-}
-
-static po::typed_value<bool> *make_opt(bool &var)
-{
-    return po::bool_switch(&var)->default_value(var);
 }
 
 static void usage(std::ostream &o, const po::options_description &desc)
