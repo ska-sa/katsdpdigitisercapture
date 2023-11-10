@@ -42,30 +42,11 @@ static constexpr int MAX_ADDRESSES = 8;
 /* Take buffer of packed 10-bit signed values (big-endian) and return them as 16-bit
  * values.
  */
-static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::size_t length, bool non_icd)
+static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::size_t length)
 {
     std::size_t out_length = length * 8 / 10;
     std::vector<std::int16_t> out;
     out.reserve(out_length);
-    std::vector<std::uint8_t> data2;
-    if (non_icd)
-    {
-        /* Non-compliant bit packing. To fix it up:
-         * - take 320 bits (40 bytes)
-         * - split it into 64-bit values, and reverse them
-         * - split it into 80-bit values, and reverse them
-         */
-        data2.resize(length);
-        for (std::size_t i = 0; i < length; i += 40)
-        {
-            char shuffle[40];
-            for (int j = 0; j < 40; j += 8)
-                std::memcpy(&shuffle[32 - j], &data[i + j], 8);
-            for (int j = 0; j < 40; j += 10)
-                memcpy(&data2[i + j], &shuffle[30 - j], 10);
-        }
-        data = data2.data();
-    }
     std::uint64_t buffer = 0;
     int buffer_bits = 0;
     for (std::size_t i = 0; i < length; i += 4)
@@ -92,7 +73,6 @@ static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::siz
 
 struct options
 {
-    bool non_icd = false;
     std::uint64_t max_heaps = std::numeric_limits<std::uint64_t>::max();
     std::string input_file;
     std::string output_file;
@@ -381,7 +361,6 @@ static options parse_options(int argc, char **argv)
     options opts;
     po::options_description desc, hidden, all;
     desc.add_options()
-        ("non-icd", make_opt(opts.non_icd), "Assume digitiser is not ICD compliant")
         ("heaps", make_opt(opts.max_heaps), "Number of heaps to process [all]")
     ;
     hidden.add_options()
@@ -445,7 +424,7 @@ int main(int argc, char **argv)
         {
             decoded_info out_info;
             out_info.timestamp = info.timestamp;
-            out_info.data = decode_10bit(info.data, info.length, opts.non_icd);
+            out_info.data = decode_10bit(info.data, info.length);
             out->emplace_back(std::move(out_info));
         }
         return out;
