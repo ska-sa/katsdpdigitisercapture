@@ -73,7 +73,7 @@ template<int left>
 [[gnu::target("avx2")]]
 static inline __m256i extr(__m256i in)
 {
-    static_assert(0 <= left && left <= 22, "left is out of ange");
+    static_assert(0 <= left && left <= 22, "left is out of range");
     if (left)
         return _mm256_srai_epi32(_mm256_slli_epi32(in, left), 22);
     else
