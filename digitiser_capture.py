@@ -29,8 +29,6 @@ def parse_args():
     parser.add_argument('-s', '--seconds', type=float, default=5, help='Length of capture')
     parser.add_argument('--heaps', type=int, help='Maximum number of heaps to convert')
     parser.add_argument('--keep', action='store_true', help='Do not delete the pcap files')
-    parser.add_argument('--non-icd', action='store_true',
-                        help='Assume digitiser is not ICD compliant')
     return parser.parse_args()
 
 
@@ -65,8 +63,6 @@ def main():
             return 1
 
         decode_cmd = ['digitiser_decode']
-        if args.non_icd:
-            decode_cmd.append('--non-icd')
         if args.heaps is not None:
             decode_cmd.extend(['--heaps', str(args.heaps)])
         decode_cmd.extend([pcap_file.name, args.output])

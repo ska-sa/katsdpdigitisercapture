@@ -14,8 +14,7 @@
 #include <vector>
 #include <unordered_set>
 #include <limits>
-#include <tbb/pipeline.h>
-#include <tbb/task_scheduler_init.h>
+#include <immintrin.h>
 #include <boost/lexical_cast.hpp>
 #include <boost/program_options.hpp>
 
@@ -42,30 +41,12 @@ static constexpr int MAX_ADDRESSES = 8;
 /* Take buffer of packed 10-bit signed values (big-endian) and return them as 16-bit
  * values.
  */
-static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::size_t length, bool non_icd)
+[[gnu::target("default")]]
+static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::size_t length)
 {
     std::size_t out_length = length * 8 / 10;
     std::vector<std::int16_t> out;
     out.reserve(out_length);
-    std::vector<std::uint8_t> data2;
-    if (non_icd)
-    {
-        /* Non-compliant bit packing. To fix it up:
-         * - take 320 bits (40 bytes)
-         * - split it into 64-bit values, and reverse them
-         * - split it into 80-bit values, and reverse them
-         */
-        data2.resize(length);
-        for (std::size_t i = 0; i < length; i += 40)
-        {
-            char shuffle[40];
-            for (int j = 0; j < 40; j += 8)
-                std::memcpy(&shuffle[32 - j], &data[i + j], 8);
-            for (int j = 0; j < 40; j += 10)
-                memcpy(&data2[i + j], &shuffle[30 - j], 10);
-        }
-        data = data2.data();
-    }
     std::uint64_t buffer = 0;
     int buffer_bits = 0;
     for (std::size_t i = 0; i < length; i += 4)
@@ -88,11 +69,185 @@ static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::siz
     return out;
 }
 
+template<int left>
+[[gnu::target("avx2")]]
+static inline __m256i extr(__m256i in)
+{
+    static_assert(0 <= left && left <= 22, "left is out of range");
+    if (left)
+        return _mm256_srai_epi32(_mm256_slli_epi32(in, left), 22);
+    else
+        return _mm256_srai_epi32(in, 22);
+}
+
+template<int left>
+[[gnu::target("avx2")]]
+static inline __m256i extr2(__m256i in0, __m256i in1)
+{
+    static_assert(22 < left && left < 32, "left is out of ange");
+    __m256i part = _mm256_srai_epi32(_mm256_slli_epi32(in0, left), 22);
+    return _mm256_or_si256(part, _mm256_srli_epi32(in1, 54 - left));
+}
+
+/* AVX-2 optimised version of the decoding. This is a block-based algorithm
+ * with two levels of blocking. I'll use the term "word" to mean "32-bit
+ * value", and "register" to mean the 256-bit AVX registers (the code uses
+ * variables that the compiler assigns to registers).
+ *
+ * 1. Each loop iteration loads 1280 bits (40 words or 128 samples) into 5
+ *    registers.
+ * 2. In the first phase of the implementation, each 160-bit section of input
+ *    (5 words or 16 samples) is processed independently and corresponds to a
+ *    particular lane in all the registers.
+ *
+ * This means that in the initial loads, consecutive words are striped across
+ * registers, and consecutive lanes in each register are 160 bits apart. AVX2
+ * gather loads are used to achieve this.
+ *
+ * Since AVX2 doesn't support scatter instructions, a large part of the
+ * implementation is dedicated to transposing the data so that 16-bit outputs
+ * that need to be contiguous in memory get placed contiguously in the
+ * registers.
+ *
+ * To extract a 10-bit field, there are two cases:
+ *
+ * 1. The 10-bit value is entirely contained in a word. This is extracted
+ *    by shifting left by some number of bits, then shifting right (with sign
+ *    extension). All the unwanted bits fall out the ends.
+ * 2. The 10-bit value is split across two words. In this case both fields
+ *    need shifting to extract the relevant bits, which are then ORed together. The
+ *    second field needs a logical (unsigned) right shift so that it doesn't get
+ *    sign extension.
+ */
+[[gnu::target("avx2")]]
+static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::size_t length)
+{
+    std::size_t out_length = length * 8 / 10;
+    std::vector<std::int16_t> out(out_length);
+
+    std::size_t blocks = out_length / 128;  // 128 is number of samples per loop iteration
+    // shuffle control to swap 32-bit values from big to little endian
+    __m256i bswap = _mm256_set_epi32(
+        0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203,
+        0x0c0d0e0f, 0x08090a0b, 0x04050607, 0x00010203
+    );
+
+    /* These pointers are not aligned, which is okay because they're used with
+     * instructions that allow unaligned access.
+     */
+    const std::int32_t *x_ptr = (const std::int32_t *) data;
+    __m128i *y_ptr = (__m128i *) out.data();
+    // Offsets (in 32-bit words) at which the lanes in gather instructions
+    // are loaded. This is a strided load with a stride of 5 32-bit words.
+    __m256i offsets = _mm256_set_epi32(35, 30, 25, 20, 15, 10, 5, 0);
+
+    for (size_t i = 0; i < blocks; i++, x_ptr += 40, y_ptr += 16)
+    {
+        // Load 32-bit values and convert from big endian to little
+        __m256i a0 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 0, offsets, 4), bswap);
+        __m256i a1 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 1, offsets, 4), bswap);
+        __m256i a2 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 2, offsets, 4), bswap);
+        __m256i a3 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 3, offsets, 4), bswap);
+        __m256i a4 = _mm256_shuffle_epi8(_mm256_i32gather_epi32(x_ptr + 4, offsets, 4), bswap);
+
+        /* Extract the 10-bit values. At the end of this operation, each 32-bit
+         * element contains a 10-bit value (sign-extended). These operations
+         * are easiest to think of as if they were scalar. The different SIMD
+         * lanes correspond to different contiguous 160-bit blocks of input.
+         */
+        __m256i y0 = extr<0>(a0);
+        __m256i y1 = extr<10>(a0);
+        __m256i y2 = extr<20>(a0);
+        __m256i y3 = extr2<30>(a0, a1);
+        __m256i y4 = extr<8>(a1);
+        __m256i y5 = extr<18>(a1);
+        __m256i y6 = extr2<28>(a1, a2);
+        __m256i y7 = extr<6>(a2);
+        __m256i y8 = extr<16>(a2);
+        __m256i y9 = extr2<26>(a2, a3);
+        __m256i ya = extr<4>(a3);
+        __m256i yb = extr<14>(a3);
+        __m256i yc = extr2<24>(a3, a4);
+        __m256i yd = extr<2>(a4);
+        __m256i ye = extr<12>(a4);
+        __m256i yf = extr<22>(a4);
+
+        /* Now the transposition/interleaving starts. The pack/unpack
+         * instructions in AVX are weird: they treat each YMM register as two
+         * separate 128-bit registers, and the instruction occurs independent
+         * on the lower and upper halves. Any descriptions below should thus be
+         * treated as applying separately to each half, and the lower halves
+         * always jointly contain the first half of the output.
+         */
+
+        // Cast down from 32-bit to 16-bit. Each variable yU_V contains
+        // all values for U followed by those for V (not interleaved).
+        __m256i y0_8 = _mm256_packs_epi32(y0, y8);
+        __m256i y1_9 = _mm256_packs_epi32(y1, y9);
+        __m256i y2_a = _mm256_packs_epi32(y2, ya);
+        __m256i y3_b = _mm256_packs_epi32(y3, yb);
+        __m256i y4_c = _mm256_packs_epi32(y4, yc);
+        __m256i y5_d = _mm256_packs_epi32(y5, yd);
+        __m256i y6_e = _mm256_packs_epi32(y6, ye);
+        __m256i y7_f = _mm256_packs_epi32(y7, yf);
+
+        // yUV alternates between values for U and for V
+        __m256i y01 = _mm256_unpacklo_epi16(y0_8, y1_9);
+        __m256i y23 = _mm256_unpacklo_epi16(y2_a, y3_b);
+        __m256i y45 = _mm256_unpacklo_epi16(y4_c, y5_d);
+        __m256i y67 = _mm256_unpacklo_epi16(y6_e, y7_f);
+        __m256i y89 = _mm256_unpackhi_epi16(y0_8, y1_9);
+        __m256i yab = _mm256_unpackhi_epi16(y2_a, y3_b);
+        __m256i ycd = _mm256_unpackhi_epi16(y4_c, y5_d);
+        __m256i yef = _mm256_unpackhi_epi16(y6_e, y7_f);
+
+        // yABCD_pX is the X'th value containing interleaved A, B, C, and D components.
+        __m256i y0123_p0 = _mm256_unpacklo_epi32(y01, y23);
+        __m256i y0123_p1 = _mm256_unpackhi_epi32(y01, y23);
+        __m256i y4567_p0 = _mm256_unpacklo_epi32(y45, y67);
+        __m256i y4567_p1 = _mm256_unpackhi_epi32(y45, y67);
+        __m256i y89ab_p0 = _mm256_unpacklo_epi32(y89, yab);
+        __m256i y89ab_p1 = _mm256_unpackhi_epi32(y89, yab);
+        __m256i ycdef_p0 = _mm256_unpacklo_epi32(ycd, yef);
+        __m256i ycdef_p1 = _mm256_unpackhi_epi32(ycd, yef);
+
+        __m256i y01234567_p0 = _mm256_unpacklo_epi64(y0123_p0, y4567_p0);
+        __m256i y01234567_p1 = _mm256_unpackhi_epi64(y0123_p0, y4567_p0);
+        __m256i y01234567_p2 = _mm256_unpacklo_epi64(y0123_p1, y4567_p1);
+        __m256i y01234567_p3 = _mm256_unpackhi_epi64(y0123_p1, y4567_p1);
+        __m256i y89abcdef_p0 = _mm256_unpacklo_epi64(y89ab_p0, ycdef_p0);
+        __m256i y89abcdef_p1 = _mm256_unpackhi_epi64(y89ab_p0, ycdef_p0);
+        __m256i y89abcdef_p2 = _mm256_unpacklo_epi64(y89ab_p1, ycdef_p1);
+        __m256i y89abcdef_p3 = _mm256_unpackhi_epi64(y89ab_p1, ycdef_p1);
+
+        /* Write back results. As noted above, the lower halves contain all the
+         * data for the first half of the output.
+         */
+        _mm_storeu_si128(y_ptr + 0x0, _mm256_extracti128_si256(y01234567_p0, 0));
+        _mm_storeu_si128(y_ptr + 0x1, _mm256_extracti128_si256(y89abcdef_p0, 0));
+        _mm_storeu_si128(y_ptr + 0x2, _mm256_extracti128_si256(y01234567_p1, 0));
+        _mm_storeu_si128(y_ptr + 0x3, _mm256_extracti128_si256(y89abcdef_p1, 0));
+        _mm_storeu_si128(y_ptr + 0x4, _mm256_extracti128_si256(y01234567_p2, 0));
+        _mm_storeu_si128(y_ptr + 0x5, _mm256_extracti128_si256(y89abcdef_p2, 0));
+        _mm_storeu_si128(y_ptr + 0x6, _mm256_extracti128_si256(y01234567_p3, 0));
+        _mm_storeu_si128(y_ptr + 0x7, _mm256_extracti128_si256(y89abcdef_p3, 0));
+        _mm_storeu_si128(y_ptr + 0x8, _mm256_extracti128_si256(y01234567_p0, 1));
+        _mm_storeu_si128(y_ptr + 0x9, _mm256_extracti128_si256(y89abcdef_p0, 1));
+        _mm_storeu_si128(y_ptr + 0xa, _mm256_extracti128_si256(y01234567_p1, 1));
+        _mm_storeu_si128(y_ptr + 0xb, _mm256_extracti128_si256(y89abcdef_p1, 1));
+        _mm_storeu_si128(y_ptr + 0xc, _mm256_extracti128_si256(y01234567_p2, 1));
+        _mm_storeu_si128(y_ptr + 0xd, _mm256_extracti128_si256(y89abcdef_p2, 1));
+        _mm_storeu_si128(y_ptr + 0xe, _mm256_extracti128_si256(y01234567_p3, 1));
+        _mm_storeu_si128(y_ptr + 0xf, _mm256_extracti128_si256(y89abcdef_p3, 1));
+    }
+    _mm256_zeroupper();
+    return out;
+}
+
 /***************************************************************************/
 
 struct options
 {
-    bool non_icd = false;
     std::uint64_t max_heaps = std::numeric_limits<std::uint64_t>::max();
     std::string input_file;
     std::string output_file;
@@ -365,11 +520,6 @@ static po::typed_value<T> *make_opt(T &var)
     return po::value<T>(&var)->default_value(var);
 }
 
-static po::typed_value<bool> *make_opt(bool &var)
-{
-    return po::bool_switch(&var)->default_value(var);
-}
-
 static void usage(std::ostream &o, const po::options_description &desc)
 {
     o << "Usage: digitiser_decode [opts] <input.pcap> <output.npy>\n";
@@ -381,7 +531,6 @@ static options parse_options(int argc, char **argv)
     options opts;
     po::options_description desc, hidden, all;
     desc.add_options()
-        ("non-icd", make_opt(opts.non_icd), "Assume digitiser is not ICD compliant")
         ("heaps", make_opt(opts.max_heaps), "Number of heaps to process [all]")
     ;
     hidden.add_options()
@@ -421,49 +570,23 @@ static options parse_options(int argc, char **argv)
 int main(int argc, char **argv)
 {
     options opts = parse_options(argc, argv);
-    // Leave 1 core free for decoding the SPEAD stream
-    int n_threads = tbb::task_scheduler_init::default_num_threads() - 1;
-    if (n_threads < 1)
-        n_threads = 1;
-    tbb::task_scheduler_init init_tbb(n_threads);
 
     loader load(opts);
     writer out(opts.output_file, load.first_timestamp, load.samples);
 
-    auto read_filter = [&] (tbb::flow_control &fc) -> std::shared_ptr<heap_batch>
+    while (true)
     {
-        std::shared_ptr<heap_batch> batch = std::make_shared<heap_batch>(load.next_batch());
-        if (batch->empty())
-            fc.stop();
-        return batch;
-    };
-
-    auto decode_filter = [&](std::shared_ptr<heap_batch> batch) -> std::shared_ptr<decoded_batch>
-    {
-        std::shared_ptr<decoded_batch> out = std::make_shared<decoded_batch>();
-        for (const heap_info &info : *batch)
+        heap_batch batch{load.next_batch()};
+        if (batch.empty())
+            break;
+        for (const heap_info &info : batch)
         {
             decoded_info out_info;
             out_info.timestamp = info.timestamp;
-            out_info.data = decode_10bit(info.data, info.length, opts.non_icd);
-            out->emplace_back(std::move(out_info));
+            out_info.data = decode_10bit(info.data, info.length);
+            out.write(out_info);
         }
-        return out;
-    };
-
-    auto write_filter = [&](std::shared_ptr<decoded_batch> batch)
-    {
-        for (const decoded_info &decoded : *batch)
-            out.write(decoded);
-    };
-
-    tbb::parallel_pipeline(16,
-        tbb::make_filter<void, std::shared_ptr<heap_batch>>(
-            tbb::filter::serial_in_order, read_filter)
-        & tbb::make_filter<std::shared_ptr<heap_batch>, std::shared_ptr<decoded_batch>>(
-            tbb::filter::parallel, decode_filter)
-        & tbb::make_filter<std::shared_ptr<decoded_batch>, void>(
-            tbb::filter::serial, write_filter));
+    }
 
     // Write in the header
     out.close();
