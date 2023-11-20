@@ -89,24 +89,35 @@ static inline __m256i extr2(__m256i in0, __m256i in1)
     return _mm256_or_si256(part, _mm256_srli_epi32(in1, 54 - left));
 }
 
-/* AVX-2 optimised version of the decoding. It loads 32-bit integers and does
- * shifting to extract the relevant bits. Gather instructions are used to
- * transpose the 32-bit integers on load, so that consecutive 32-bit values are
- * in consecutive registers/variables. To extract a 10-bit field, there are two
- * cases:
+/* AVX-2 optimised version of the decoding. This is a block-based algorithm
+ * with two levels of blocking. I'll use the term "word" to mean "32-bit
+ * value", and "register" to mean the 256-bit AVX registers (the code uses
+ * variables that the compiler assigns to registers).
  *
- * 1. The 10-bit value is entirely contained in the 32-bit field. This is extracted
- *    by shifting left by some number of bits, then shifting right (with sign
- *    extension). All the unwanted bits fall out the ends.
- * 2. The 10-bit value is split across two 32-bit fields. In this case both fields
- *    need shifting to extract the relevant bits, which are then ORed together. The
- *    second field needs a logical (unsigned) right shift so that it doesn't get
- *    sign extension.
+ * 1. Each loop iteration loads 1280 bits (40 words or 128 samples) into 5
+ *    registers.
+ * 2. In the first phase of the implementation, each 160-bit section of input
+ *    (5 words or 16 samples) is processed independently and corresponds to a
+ *    particular lane in all the registers.
+ *
+ * This means that in the initial loads, consecutive words are striped across
+ * registers, and consecutive lanes in each register are 160 bits apart. AVX2
+ * gather loads are used to achieve this.
  *
  * Since AVX2 doesn't support scatter instructions, a large part of the
  * implementation is dedicated to transposing the data so that 16-bit outputs
  * that need to be contiguous in memory get placed contiguously in the
  * registers.
+ *
+ * To extract a 10-bit field, there are two cases:
+ *
+ * 1. The 10-bit value is entirely contained in a word. This is extracted
+ *    by shifting left by some number of bits, then shifting right (with sign
+ *    extension). All the unwanted bits fall out the ends.
+ * 2. The 10-bit value is split across two words. In this case both fields
+ *    need shifting to extract the relevant bits, which are then ORed together. The
+ *    second field needs a logical (unsigned) right shift so that it doesn't get
+ *    sign extension.
  */
 [[gnu::target("avx2")]]
 static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::size_t length)
@@ -127,7 +138,7 @@ static std::vector<std::int16_t> decode_10bit(const std::uint8_t *data, std::siz
     const std::int32_t *x_ptr = (const std::int32_t *) data;
     __m128i *y_ptr = (__m128i *) out.data();
     // Offsets (in 32-bit words) at which the lanes in gather instructions
-    // are loaded.
+    // are loaded. This is a strided load with a stride of 5 32-bit words.
     __m256i offsets = _mm256_set_epi32(35, 30, 25, 20, 15, 10, 5, 0);
 
     for (size_t i = 0; i < blocks; i++, x_ptr += 40, y_ptr += 16)
